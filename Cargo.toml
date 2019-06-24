@@ -1,0 +1,12 @@
+[package]
+name = "rlua-ws"
+version = "0.1.0"
+authors = ["Incinirate <dogescript@gmail.com>"]
+edition = "2018"
+
+[lib]
+name = "rlua_ws"
+crate-type = ["dylib"]
+
+[dependencies]
+ws = "0.8.1"
