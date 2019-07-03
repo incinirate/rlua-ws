@@ -8,6 +8,7 @@ use std::ptr::null;
 use std::{ptr, mem};
 use std::collections::{BTreeMap, HashMap};
 use std::cmp::Ordering;
+use std::ops::DerefMut;
 
 pub enum lua_State {}
 
@@ -74,6 +75,9 @@ extern "C" {
 //    pub fn lua_pushlightuserdata(state: *mut lua_State, data: *mut c_void);
     pub fn lua_pushcclosure(state: *mut lua_State, function: Option<CFunction>, n: c_int);
 //    pub fn lua_pushthread(state: *mut lua_State) -> c_int;
+
+    pub fn lua_newuserdata(state: *mut lua_State, size: usize) -> *mut c_void;
+    pub fn luaL_checkudata(state: *mut lua_State, index: c_int, name: *const u8) -> *mut c_void;
 
     pub fn lua_setfield(state: *mut lua_State, index: c_int, k: *const c_char);
 
@@ -250,14 +254,15 @@ pub enum LuaValue {
     Table(LuaTable),
     TableRef(LuaRef), // Not a real Lua type, just used as an optimization (avoid exploring tables recursively unless the end user wants to)
     Function(LuaFn),
-    Userdata(*mut c_void),
+    Userdata(LuaRef),
     LightUserdata(*mut c_void),
     Thread(*mut lua_State)
 }
 
-trait Userdata {
-    fn setup(&self);
-    fn gc(&self);
+pub trait Userdata: Drop {
+    fn setup(&mut self);
+//    fn gc(&self);
+    fn get_metatable_name() -> &'static str;
 }
 
 #[derive(Debug)]
@@ -284,14 +289,15 @@ unsafe fn moveValue(state: *mut lua_State, pos: i32, expandTable: bool) -> LuaVa
             ptr::copy_nonoverlapping(str_ptr, dst.as_mut_ptr(), len);
 
             LuaValue::String(String::from_utf8_lossy(&dst).into_owned())
-        }
+        },
         LuaRawType::Table => unsafe {
             if expandTable {
                 toRTable(state, pos)
             } else {
-                LuaValue::TableRef(LuaRef::new(state, -1))
+                LuaValue::TableRef(LuaRef::new(state, pos))
             }
-        }
+        },
+        LuaRawType::Userdata => unsafe { LuaValue::Userdata(LuaRef::new(state, pos)) },
 
         _ => unimplemented!()
     }
@@ -342,29 +348,30 @@ impl LibMethodContext {
 
         let argCount = unsafe { lua_gettop(state) };
         for i in 1..argCount + 1 {
-            argVec.push(match unsafe { lua_type(state, i) } {
-                LuaRawType::Nil => LuaValue::Nil,
-                LuaRawType::Number => LuaValue::Number(LuaNumber::new(unsafe { lua_tonumber(state, i) })),
-                LuaRawType::String => unsafe {
-                    // tolstring expects a ptr to an integer which it sets to the length of the returned string
-                    let len_ptr = Box::into_raw(Box::new(0));
-                    let str_ptr = lua_tolstring(state, i, len_ptr);
-
-                    // Extract the length from the aforementioned ptr
-                    let len = *Box::from_raw(len_ptr);
-
-                    // Lua will garbage collect the string it gave us eventually, so we need to clone it
-                    let mut dst = Vec::new();
-                    dst.resize(len, 0);
-                    ptr::copy_nonoverlapping(str_ptr, dst.as_mut_ptr(), len);
-
-                    LuaValue::String(String::from_utf8_lossy(&dst).into_owned())
-                },
-                LuaRawType::Table => unsafe { toRTable(state, i) },
-                LuaRawType::Userdata => LuaValue::Userdata(unsafe { lua_touserdata(state, i) }),
-
-                _ => unimplemented!()
-            });
+            argVec.push(unsafe { moveValue(state, i, true) });
+//            argVec.push(match unsafe { lua_type(state, i) } {
+//                LuaRawType::Nil => LuaValue::Nil,
+//                LuaRawType::Number => LuaValue::Number(LuaNumber::new(unsafe { lua_tonumber(state, i) })),
+//                LuaRawType::String => unsafe {
+//                    // tolstring expects a ptr to an integer which it sets to the length of the returned string
+//                    let len_ptr = Box::into_raw(Box::new(0));
+//                    let str_ptr = lua_tolstring(state, i, len_ptr);
+//
+//                    // Extract the length from the aforementioned ptr
+//                    let len = *Box::from_raw(len_ptr);
+//
+//                    // Lua will garbage collect the string it gave us eventually, so we need to clone it
+//                    let mut dst = Vec::new();
+//                    dst.resize(len, 0);
+//                    ptr::copy_nonoverlapping(str_ptr, dst.as_mut_ptr(), len);
+//
+//                    LuaValue::String(String::from_utf8_lossy(&dst).into_owned())
+//                },
+//                LuaRawType::Table => unsafe { toRTable(state, i) },
+//                LuaRawType::Userdata => LuaValue::Userdata(unsafe { lua_touserdata(state, i) }),
+//
+//                _ => unimplemented!()
+//            });
         }
 
         LibMethodContext {
@@ -373,7 +380,7 @@ impl LibMethodContext {
         }
     }
 
-    pub fn checkArgs(&self, name: &str, expect_types: &Vec<LuaRawType>) -> Result<(), String> {
+    pub fn check_args(&self, name: &str, expect_types: &Vec<LuaRawType>) -> Result<(), String> {
         for (index, (a_type, e_type)) in self.args.iter().map(val_type).zip(expect_types).enumerate() {
             if a_type != *e_type {
                 let e_name = self.lua_type_string(*e_type);
@@ -392,6 +399,28 @@ impl LibMethodContext {
         }
 
         Ok(())
+    }
+
+    pub fn gen_udata<D: Userdata>(&self) -> (&mut D, LuaRef) {
+        unsafe {
+            let ptr = lua_newuserdata(self.state, mem::size_of::<D>()) as *mut D;
+            let lua_ref = LuaRef::new(self.state, -1);
+            lua_pop(self.state, 1); // new Ref keeps the value on the stack, but we don't want it there so get rid of it
+
+            let reference = &mut *ptr;
+            reference.setup();
+
+            return (reference, lua_ref);
+        }
+    }
+
+    pub fn check_udata<D: Userdata>(&self, index: i32) -> bool {
+        let name = D::get_metatable_name();
+        let name_cstr = CString::new(name).unwrap();
+
+        let ptr: *const c_void = unsafe { luaL_checkudata(self.state, index, name.as_ptr()) };
+
+        return ptr != null();
     }
 
     pub fn error(&self, msg: &str) -> Result<Vec<LuaValue>, ()> {
@@ -419,7 +448,7 @@ pub unsafe fn unload_vals(state: *mut lua_State, vals: &Vec<LuaValue>) {
             LuaValue::Table(x) => { unimplemented!(); },
             LuaValue::TableRef(x) => { unimplemented!() ; },
             LuaValue::Function(x) => { unimplemented!(); },
-            LuaValue::Userdata(x) => { unimplemented!(); },
+            LuaValue::Userdata(x) => { x.onto_stack() },
             LuaValue::LightUserdata(x) => { unimplemented!(); },
             LuaValue::Thread(x) => { unimplemented!(); }
         }
@@ -465,7 +494,7 @@ macro_rules! lib_fn {
 #[macro_export]
 macro_rules! chk_args {
     ($ctx:ident, $name:expr, [ $( $arg:ident ),* ]) => {
-        match $ctx.checkArgs($name, &vec![ $( LuaRawType::$arg ),* ]) {
+        match $ctx.check_args($name, &vec![ $( LuaRawType::$arg ),* ]) {
             Ok(..) => {}
             Err(e) => {
                 return $ctx.error(&e);
