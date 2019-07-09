@@ -1,4 +1,4 @@
-#![crate_type = "dylib"]
+#![crate_type = "cdylib"]
 
 #[macro_use]
 mod bindings;
@@ -16,6 +16,7 @@ mod tests {
 
 #[no_mangle]
 pub unsafe extern "C" fn luaopen_ws(state: *mut lua_State) -> c_int {
+    register_userdata!(state, [ Connection ]);
     define_lib(state, &[
         luaL_Reg::new("connect", lib_connect),
         luaL_Reg::new("checkval", lib_checkval)
@@ -26,11 +27,12 @@ struct Connection {
     x: i32
 }
 
-impl Drop for Connection {
-    fn drop(&mut self) {
-        unimplemented!()
-    }
-}
+// impl Drop for Connection {
+//     fn drop(&mut self) {
+//         // self.x.drop();
+//         println!("Dropping!");
+//     }
+// }
 
 impl Userdata for Connection {
     fn setup(&mut self) {
@@ -40,6 +42,11 @@ impl Userdata for Connection {
 
     fn get_metatable_name() -> &'static str {
         return "ws.connection";
+    }
+
+    extern "C" fn gc(_state: *mut lua_State) -> c_int {
+        println!("Dropping!");
+        0
     }
 }
 
@@ -58,10 +65,16 @@ fn connect(ctx: LibMethodContext) -> LibResult {
 lib_fn!(checkval, lib_checkval);
 fn checkval(ctx: LibMethodContext) -> LibResult {
     chk_args!(ctx, "checkval", [Userdata]);
-    if ctx.check_udata::<Connection>(1) { return Err(()); }
+    
+    let conn = ctx.check_udata::<Connection>(1).ok_or_else(|| {println!("wow"); ()})?;
+    // if let Err(..) = conn { return Err(()) }
 //    let (my_connection, con_ref) = ctx.gen_udata::<Connection>();
 //
 //    my_connection.x = 5;
+
+    // let val_ref = match &ctx.args[0] { LuaValue::Userdata(x) => x, _ => panic!("Userdata unwrap failed after typecheck") };
+    // val_ref.
+    println!("Extracted value: {}", conn.x);
 
     Ok(vec![])
 }

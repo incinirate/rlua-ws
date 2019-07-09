@@ -1,3 +1,4 @@
+#![crate_type = "cdylib"]
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 #![allow(unused)]
@@ -58,8 +59,10 @@ pub type LibResult = Result<Vec<LuaValue>, ()>;
 
 pub const LUA_REGISTRYINDEX: c_int = (-10000);
 
+#[link(name="lua51", kind = "dylib")]
 extern "C" {
     pub fn lua_createtable(state: *mut lua_State, narr: c_int, nrec: c_int);
+    pub fn lua_settable(state: *mut lua_State, idx: c_int);
 
     pub fn luaL_setfuncs(state: *mut lua_State, l: *const luaL_Reg, nup: c_int);
 
@@ -76,9 +79,14 @@ extern "C" {
     pub fn lua_pushcclosure(state: *mut lua_State, function: Option<CFunction>, n: c_int);
 //    pub fn lua_pushthread(state: *mut lua_State) -> c_int;
 
-    pub fn lua_newuserdata(state: *mut lua_State, size: usize) -> *mut c_void;
-    pub fn luaL_checkudata(state: *mut lua_State, index: c_int, name: *const u8) -> *mut c_void;
+    pub fn luaL_newmetatable(state: *mut lua_State, name: *const c_char);
+    // pub fn luaL_getmetatable(state: *mut lua_State, name: *const c_char);
+    pub fn lua_setmetatable(state: *mut lua_State, index: i32);
 
+    pub fn lua_newuserdata(state: *mut lua_State, size: usize) -> *mut c_void;
+    pub fn luaL_checkudata(state: *mut lua_State, index: c_int, name: *const c_char) -> *mut c_void;
+
+    pub fn lua_getfield(state: *mut lua_State, index: c_int, k: *const c_char);
     pub fn lua_setfield(state: *mut lua_State, index: c_int, k: *const c_char);
 
     pub fn lua_gettop(state: *mut lua_State) -> c_int;
@@ -88,7 +96,7 @@ extern "C" {
     pub fn lua_rawgeti(state: *mut lua_State, idx: c_int, n: c_int);
 
 //int (luaL_error) (lua_State *L, const char *fmt, ...)
-    pub fn luaL_error(state: *mut lua_State, fmt: *const u8);
+    pub fn luaL_error(state: *mut lua_State, fmt: *const c_char);
 
 //    pub fn lua_pop(state: *mut lua_State, index: c_int);
 
@@ -112,6 +120,10 @@ pub unsafe fn lua_pop(state: *mut lua_State, n: i32) {
 
 pub unsafe fn lua_newtable(state: *mut lua_State) {
     lua_createtable(state, 0, 0);
+}
+
+pub unsafe fn luaL_getmetatable(state: *mut lua_State, name: *const c_char) {
+    lua_getfield(state, LUA_REGISTRYINDEX, name);
 }
 
 pub unsafe fn register_lib(state: *mut lua_State, lib: &[luaL_Reg]) {
@@ -259,16 +271,18 @@ pub enum LuaValue {
     Thread(*mut lua_State)
 }
 
-pub trait Userdata: Drop {
+pub trait Userdata {
     fn setup(&mut self);
 //    fn gc(&self);
     fn get_metatable_name() -> &'static str;
+
+    extern "C" fn gc(state: *mut lua_State) -> c_int;
 }
 
 #[derive(Debug)]
 pub struct LibMethodContext {
     state: *mut lua_State,
-    args: Vec<LuaValue>
+    pub args: Vec<LuaValue>
 }
 
 unsafe fn moveValue(state: *mut lua_State, pos: i32, expandTable: bool) -> LuaValue {
@@ -404,6 +418,12 @@ impl LibMethodContext {
     pub fn gen_udata<D: Userdata>(&self) -> (&mut D, LuaRef) {
         unsafe {
             let ptr = lua_newuserdata(self.state, mem::size_of::<D>()) as *mut D;
+
+            let name = D::get_metatable_name();
+            let name_cstr = CString::new(name).unwrap();
+            luaL_getmetatable(self.state, name_cstr.as_ptr());
+            lua_setmetatable(self.state, -2);
+
             let lua_ref = LuaRef::new(self.state, -1);
             lua_pop(self.state, 1); // new Ref keeps the value on the stack, but we don't want it there so get rid of it
 
@@ -414,17 +434,22 @@ impl LibMethodContext {
         }
     }
 
-    pub fn check_udata<D: Userdata>(&self, index: i32) -> bool {
+    pub fn check_udata<D: Userdata>(&self, index: i32) -> Option<&mut D> {
         let name = D::get_metatable_name();
         let name_cstr = CString::new(name).unwrap();
 
-        let ptr: *const c_void = unsafe { luaL_checkudata(self.state, index, name.as_ptr()) };
+        let ptr: *const c_void = unsafe { luaL_checkudata(self.state, index, name_cstr.as_ptr()) };
 
-        return ptr != null();
+        if ptr == null() {
+            return None;
+        }
+
+        return Some(unsafe { &mut *(ptr as *mut D) });
     }
 
     pub fn error(&self, msg: &str) -> Result<Vec<LuaValue>, ()> {
-        unsafe { luaL_error(self.state, msg.as_ptr()) };
+        let msg_cstr = CString::new(msg).unwrap();
+        unsafe { luaL_error(self.state, msg_cstr.as_ptr()) };
         Err(())
     }
 
@@ -501,4 +526,20 @@ macro_rules! chk_args {
             }
         };
     }
+}
+
+#[macro_export]
+macro_rules! register_userdata {
+    ($state:expr, [ $( $name:ident ),* ] ) => {
+        $(
+            let mname = $name::get_metatable_name();
+            let mname_cstr = std::ffi::CString::new(mname).unwrap();
+            luaL_newmetatable($state, mname_cstr.as_ptr());
+
+            /* set its __gc field */
+            lua_pushlstring($state, "__gc".as_ptr(), 4);
+            lua_pushcclosure($state, Some($name::gc), 0);
+            lua_settable($state, -3);
+        )*
+    };
 }

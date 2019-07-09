@@ -6,7 +6,7 @@ edition = "2018"
 
 [lib]
 name = "rlua_ws"
-crate-type = ["dylib"]
+crate-type = ["cdylib"]
 
 [dependencies]
 ws = "0.8.1"
