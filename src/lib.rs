@@ -35,19 +35,22 @@ struct Connection {
 // }
 
 impl Userdata for Connection {
+    const METATABLE_NAME: &'static str = "ws.connection";
+
     fn setup(&mut self) {
         // Nothing to do
         self.x = 0;
     }
 
-    fn get_metatable_name() -> &'static str {
-        return "ws.connection";
+    fn drop(&mut self) {
+        // self.x.drop();
+        println!("Dropping!");
     }
 
-    extern "C" fn gc(_state: *mut lua_State) -> c_int {
-        println!("Dropping!");
-        0
-    }
+    // extern "C" fn gc(_state: *mut lua_State) -> c_int {
+    //     println!("Dropping!");
+    //     0
+    // }
 }
 
 
@@ -65,7 +68,7 @@ fn connect(ctx: LibMethodContext) -> LibResult {
 lib_fn!(checkval, lib_checkval);
 fn checkval(ctx: LibMethodContext) -> LibResult {
     chk_args!(ctx, "checkval", [Userdata]);
-    
+
     let conn = ctx.check_udata::<Connection>(1).ok_or_else(|| {println!("wow"); ()})?;
     // if let Err(..) = conn { return Err(()) }
 //    let (my_connection, con_ref) = ctx.gen_udata::<Connection>();

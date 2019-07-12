@@ -23,6 +23,16 @@ typedef struct luaL_Reg {
 } luaL_Reg;
 
 */
+fn cstr(name: &'static str) -> CString {
+    CString::new(name).unwrap()
+}
+
+macro_rules! cstr {
+    ($x:expr) => {
+        concat!($x, "\0").as_ptr() as *const c_char
+    };
+}
+
 #[repr(C)]
 pub struct luaL_Reg {
     pub name: *const c_char,
@@ -30,7 +40,7 @@ pub struct luaL_Reg {
 }
 
 impl luaL_Reg {
-    pub fn new(name: &str, func: CFunction) -> luaL_Reg {
+    pub fn new(name: &'static str, func: CFunction) -> luaL_Reg {
         luaL_Reg { name: CString::new(name).unwrap().into_raw(), func: Some(func) }
     }
 }
@@ -59,7 +69,7 @@ pub type LibResult = Result<Vec<LuaValue>, ()>;
 
 pub const LUA_REGISTRYINDEX: c_int = (-10000);
 
-#[link(name="lua51", kind = "dylib")]
+// #[link(name="lua51", kind = "dylib")]
 extern "C" {
     pub fn lua_createtable(state: *mut lua_State, narr: c_int, nrec: c_int);
     pub fn lua_settable(state: *mut lua_State, idx: c_int);
@@ -96,7 +106,7 @@ extern "C" {
     pub fn lua_rawgeti(state: *mut lua_State, idx: c_int, n: c_int);
 
 //int (luaL_error) (lua_State *L, const char *fmt, ...)
-    pub fn luaL_error(state: *mut lua_State, fmt: *const c_char);
+    pub fn luaL_error(state: *mut lua_State, fmt: *const c_char) -> c_int;
 
 //    pub fn lua_pop(state: *mut lua_State, index: c_int);
 
@@ -272,11 +282,30 @@ pub enum LuaValue {
 }
 
 pub trait Userdata {
-    fn setup(&mut self);
-//    fn gc(&self);
-    fn get_metatable_name() -> &'static str;
+    const METATABLE_NAME: &'static str;
 
-    extern "C" fn gc(state: *mut lua_State) -> c_int;
+    fn setup(&mut self);
+    fn drop(&mut self);
+
+    // fn get_metatable_name() -> &'static str;
+
+    // extern "C" fn gc(state: *mut lua_State) -> c_int;
+}
+
+pub extern "C" fn gc_impl<D: Userdata>(state: *mut lua_State) -> c_int {
+    unsafe {
+        let name = cstr(D::METATABLE_NAME);
+        let ptr: *const c_void = luaL_checkudata(state, 1, name.as_ptr());
+
+        if ptr == null() {
+            return luaL_error(state, cstr!("specialized userdata gc called with incorrect type"));
+        }
+
+        let obj = &mut *(ptr as *mut D);
+        obj.drop();
+
+        return 0;
+    }
 }
 
 #[derive(Debug)]
@@ -419,9 +448,8 @@ impl LibMethodContext {
         unsafe {
             let ptr = lua_newuserdata(self.state, mem::size_of::<D>()) as *mut D;
 
-            let name = D::get_metatable_name();
-            let name_cstr = CString::new(name).unwrap();
-            luaL_getmetatable(self.state, name_cstr.as_ptr());
+            let name = cstr(D::METATABLE_NAME);
+            luaL_getmetatable(self.state, name.as_ptr());
             lua_setmetatable(self.state, -2);
 
             let lua_ref = LuaRef::new(self.state, -1);
@@ -435,10 +463,8 @@ impl LibMethodContext {
     }
 
     pub fn check_udata<D: Userdata>(&self, index: i32) -> Option<&mut D> {
-        let name = D::get_metatable_name();
-        let name_cstr = CString::new(name).unwrap();
-
-        let ptr: *const c_void = unsafe { luaL_checkudata(self.state, index, name_cstr.as_ptr()) };
+        let name = cstr(D::METATABLE_NAME);
+        let ptr: *const c_void = unsafe { luaL_checkudata(self.state, index, name.as_ptr()) };
 
         if ptr == null() {
             return None;
@@ -532,13 +558,12 @@ macro_rules! chk_args {
 macro_rules! register_userdata {
     ($state:expr, [ $( $name:ident ),* ] ) => {
         $(
-            let mname = $name::get_metatable_name();
-            let mname_cstr = std::ffi::CString::new(mname).unwrap();
-            luaL_newmetatable($state, mname_cstr.as_ptr());
+            let mname = std::ffi::CString::new($name::METATABLE_NAME).unwrap();
+            luaL_newmetatable($state, mname.as_ptr());
 
             /* set its __gc field */
             lua_pushlstring($state, "__gc".as_ptr(), 4);
-            lua_pushcclosure($state, Some($name::gc), 0);
+            lua_pushcclosure($state, Some(gc_impl::<$name>), 0);
             lua_settable($state, -3);
         )*
     };
