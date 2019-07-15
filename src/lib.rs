@@ -53,6 +53,55 @@ impl Userdata for Connection {
     // }
 }
 
+struct Client {
+    sender: ws::Sender
+}
+impl ws::Handler for Client {
+    fn on_open(&mut self, shake: ws::Handshake) -> ws::Result<()> {
+        println!("hmmmmm");
+        if let Some(addr) = shake.remote_addr()? {
+            println!("Connection with {} now open", addr);
+        }
+
+        self.sender.send("Hello WebSocket")
+
+        // Ok(())
+    }
+
+    fn on_message(&mut self, msg: ws::Message) -> ws::Result<()> {
+        println!("Received message {:?}", msg);
+
+        self.sender.close(ws::CloseCode::Normal)
+
+        // Ok(())
+    }
+
+    fn on_close(&mut self, code: ws::CloseCode, reason: &str) {
+        println!("Connection closing due to ({:?}) {}", code, reason);
+    }
+
+    fn on_error(&mut self, err: ws::Error) {
+        println!("Encountered an error: {}\nEnable a logger to see more information.", err);
+    }
+
+    fn on_request(&mut self, req: &ws::Request) -> ws::Result<ws::Response> {
+        println!("Handler received request:\n{}", req);
+        ws::Response::from_request(req)
+    }
+
+    /// A method for handling the low-level workings of the response portion of the WebSocket
+    /// handshake.
+    ///
+    /// Implementors can inspect the Response and choose to fail the connection by
+    /// returning an error. This method will not be called when the handler represents a server
+    /// endpoint. The response should indicate which WebSocket protocol and extensions the server
+    /// has agreed to if any.
+    fn on_response(&mut self, res: &ws::Response) -> ws::Result<()> {
+        println!("Handler received response:\n{}", res);
+        Ok(())
+    }
+}
+
 
 lib_fn!(connect, lib_connect);
 fn connect(ctx: LibMethodContext) -> LibResult {
@@ -61,6 +110,20 @@ fn connect(ctx: LibMethodContext) -> LibResult {
     let (my_connection, con_ref) = ctx.gen_udata::<Connection>();
 
     my_connection.x = 5;
+
+    let url = get_arg!(ctx, 0, String); // &ctx.args[0];
+    println!("Connectiong to {}, s{}", url, url.len());
+    match ws::connect(url.to_owned(), |sender: ws::Sender| {
+        println!("Hmm:thonk:");
+        Client { sender }
+        }) {
+        Ok(()) => {
+            println!("COnnectednice");
+        },
+        Err(err) => {
+            return ctx.error(&err.details);
+        }
+    }
 
     Ok(vec![LuaValue::Userdata(con_ref)])
 }

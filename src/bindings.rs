@@ -555,6 +555,16 @@ macro_rules! chk_args {
 }
 
 #[macro_export]
+macro_rules! get_arg {
+    ($ctx:ident, $idx:expr, $type:ident) => {
+        match &$ctx.args[$idx] {
+            LuaValue::$type(x) => x,
+            _ => panic!("Type unwrap failed after typecheck")
+        }
+    };
+}
+
+#[macro_export]
 macro_rules! register_userdata {
     ($state:expr, [ $( $name:ident ),* ] ) => {
         $(
